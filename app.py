@@ -30,11 +30,20 @@ def calculate_next_due(payment_date_str: str, billing_cycle: str) -> str:
     return next_date.strftime('%Y-%m-%d')
 
 
-def payment_status(next_due_date_str: str | None, threshold_days: int = 7) -> str:
-    if not next_due_date_str:
+def _to_date(d):
+    """Accept a date object (psycopg2) or a YYYY-MM-DD string (tests/fallback)."""
+    if d is None:
+        return None
+    if isinstance(d, date):
+        return d
+    return datetime.strptime(str(d), '%Y-%m-%d').date()
+
+
+def payment_status(next_due_date, threshold_days: int = 7) -> str:
+    if not next_due_date:
         return 'pending'
     today = date.today()
-    due = datetime.strptime(next_due_date_str, '%Y-%m-%d').date()
+    due = _to_date(next_due_date)
     delta = (due - today).days
     if delta < 0:
         return 'overdue'
@@ -48,10 +57,16 @@ def enrich_website(w: dict) -> dict:
     w['payment_status'] = payment_status(ndd)
     if ndd:
         today = date.today()
-        due = datetime.strptime(ndd, '%Y-%m-%d').date()
+        due = _to_date(ndd)
         w['days_delta'] = (due - today).days
+        # Normalise to string so JSON serialisation is consistent
+        w['next_due_date'] = due.strftime('%Y-%m-%d')
     else:
         w['days_delta'] = None
+    # Normalise any other date fields
+    for field in ('start_date', 'payment_date', 'last_payment_date', 'created_at'):
+        if field in w and w[field] is not None and hasattr(w[field], 'strftime'):
+            w[field] = w[field].strftime('%Y-%m-%d')
     return w
 
 
@@ -95,7 +110,7 @@ def dashboard():
             ORDER BY payment_date DESC, id DESC
             LIMIT 1
         )
-        WHERE w.status = "active"
+        WHERE w.status = 'active'
         ORDER BY p.next_due_date ASC
     ''').fetchall()
 
@@ -111,20 +126,20 @@ def dashboard():
         else:
             active.append(item)
 
-    total_clients = db.execute('SELECT COUNT(*) FROM clients').fetchone()[0]
+    total_clients = db.execute('SELECT COUNT(*) AS count FROM clients').fetchone()['count']
     total_websites = db.execute(
-        'SELECT COUNT(*) FROM websites WHERE status="active"').fetchone()[0]
+        "SELECT COUNT(*) AS count FROM websites WHERE status='active'").fetchone()['count']
     monthly_revenue = db.execute('''
         SELECT SUM(
             CASE billing_cycle
-                WHEN "monthly"     THEN price
-                WHEN "quarterly"   THEN price / 3.0
-                WHEN "semi-annual" THEN price / 6.0
-                WHEN "annual"      THEN price / 12.0
+                WHEN 'monthly'     THEN price
+                WHEN 'quarterly'   THEN price / 3.0
+                WHEN 'semi-annual' THEN price / 6.0
+                WHEN 'annual'      THEN price / 12.0
                 ELSE price
             END
-        ) FROM websites WHERE status="active"
-    ''').fetchone()[0] or 0
+        ) AS revenue FROM websites WHERE status='active'
+    ''').fetchone()['revenue'] or 0
 
     return jsonify({
         'overdue': overdue,
@@ -159,31 +174,31 @@ def clients():
                         SELECT id FROM payments WHERE website_id = w.id
                         ORDER BY payment_date DESC LIMIT 1
                     )
-                    WHERE w.client_id = c.id AND w.status="active"
-                      AND (p.next_due_date IS NULL OR p.next_due_date < date("now"))
+                    WHERE w.client_id = c.id AND w.status = 'active'
+                      AND (p.next_due_date IS NULL OR p.next_due_date < CURRENT_DATE)
                 ) AS overdue_count
             FROM clients c
-            WHERE c.name LIKE ? OR c.business_name LIKE ?
-               OR c.email LIKE ? OR c.phone LIKE ?
+            WHERE c.name ILIKE %s OR c.business_name ILIKE %s
+               OR c.email ILIKE %s OR c.phone ILIKE %s
             ORDER BY c.name
         ''', (like, like, like, like)).fetchall()
         return jsonify([dict(r) for r in rows])
 
     data = request.get_json()
-    db.execute(
-        'INSERT INTO clients (name, business_name, phone, email, notes) VALUES (?,?,?,?,?)',
+    cur = db.execute(
+        'INSERT INTO clients (name, business_name, phone, email, notes) VALUES (%s,%s,%s,%s,%s) RETURNING id',
         (data['name'], data.get('business_name', ''), data.get('phone', ''),
          data.get('email', ''), data.get('notes', ''))
     )
     db.commit()
-    cid = db.execute('SELECT last_insert_rowid()').fetchone()[0]
-    return jsonify(dict(db.execute('SELECT * FROM clients WHERE id=?', (cid,)).fetchone())), 201
+    cid = cur.fetchone()['id']
+    return jsonify(dict(db.execute('SELECT * FROM clients WHERE id=%s', (cid,)).fetchone())), 201
 
 
 @app.route('/api/clients/<int:cid>', methods=['GET', 'PUT', 'DELETE'])
 def client_detail(cid):
     db = get_db()
-    client = db.execute('SELECT * FROM clients WHERE id=?', (cid,)).fetchone()
+    client = db.execute('SELECT * FROM clients WHERE id=%s', (cid,)).fetchone()
     if not client:
         return jsonify({'error': 'Not found'}), 404
 
@@ -198,7 +213,7 @@ def client_detail(cid):
                 SELECT id FROM payments WHERE website_id = w.id
                 ORDER BY payment_date DESC LIMIT 1
             )
-            WHERE w.client_id = ?
+            WHERE w.client_id = %s
             ORDER BY w.domain
         ''', (cid,)).fetchall()
         c['websites'] = [enrich_website(dict(w)) for w in websites]
@@ -207,17 +222,17 @@ def client_detail(cid):
     if request.method == 'PUT':
         data = request.get_json()
         db.execute(
-            'UPDATE clients SET name=?,business_name=?,phone=?,email=?,notes=? WHERE id=?',
+            'UPDATE clients SET name=%s,business_name=%s,phone=%s,email=%s,notes=%s WHERE id=%s',
             (data['name'], data.get('business_name', ''), data.get('phone', ''),
              data.get('email', ''), data.get('notes', ''), cid)
         )
         db.commit()
-        return jsonify(dict(db.execute('SELECT * FROM clients WHERE id=?', (cid,)).fetchone()))
+        return jsonify(dict(db.execute('SELECT * FROM clients WHERE id=%s', (cid,)).fetchone()))
 
     # DELETE
-    db.execute('DELETE FROM payments WHERE website_id IN (SELECT id FROM websites WHERE client_id=?)', (cid,))
-    db.execute('DELETE FROM websites WHERE client_id=?', (cid,))
-    db.execute('DELETE FROM clients WHERE id=?', (cid,))
+    db.execute('DELETE FROM payments WHERE website_id IN (SELECT id FROM websites WHERE client_id=%s)', (cid,))
+    db.execute('DELETE FROM websites WHERE client_id=%s', (cid,))
+    db.execute('DELETE FROM clients WHERE id=%s', (cid,))
     db.commit()
     return jsonify({'success': True})
 
@@ -229,11 +244,11 @@ def client_detail(cid):
 @app.route('/api/clients/<int:cid>/websites', methods=['POST'])
 def add_website(cid):
     db = get_db()
-    if not db.execute('SELECT id FROM clients WHERE id=?', (cid,)).fetchone():
+    if not db.execute('SELECT id FROM clients WHERE id=%s', (cid,)).fetchone():
         return jsonify({'error': 'Client not found'}), 404
     data = request.get_json()
-    db.execute(
-        'INSERT INTO websites (client_id,domain,hosting_provider,start_date,billing_cycle,price,status) VALUES (?,?,?,?,?,?,?)',
+    cur = db.execute(
+        'INSERT INTO websites (client_id,domain,hosting_provider,start_date,billing_cycle,price,status) VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id',
         (cid, data['domain'], data.get('hosting_provider', ''),
          data.get('start_date', date.today().isoformat()),
          data.get('billing_cycle', 'monthly'),
@@ -241,38 +256,38 @@ def add_website(cid):
          data.get('status', 'active'))
     )
     db.commit()
-    wid = db.execute('SELECT last_insert_rowid()').fetchone()[0]
-    return jsonify(dict(db.execute('SELECT * FROM websites WHERE id=?', (wid,)).fetchone())), 201
+    wid = cur.fetchone()['id']
+    return jsonify(dict(db.execute('SELECT * FROM websites WHERE id=%s', (wid,)).fetchone())), 201
 
 
 @app.route('/api/websites/<int:wid>', methods=['GET', 'PUT', 'DELETE'])
 def website_detail(wid):
     db = get_db()
-    website = db.execute('SELECT * FROM websites WHERE id=?', (wid,)).fetchone()
+    website = db.execute('SELECT * FROM websites WHERE id=%s', (wid,)).fetchone()
     if not website:
         return jsonify({'error': 'Not found'}), 404
 
     if request.method == 'GET':
         w = enrich_website(dict(website))
         w['payments'] = [dict(p) for p in db.execute(
-            'SELECT * FROM payments WHERE website_id=? ORDER BY payment_date DESC', (wid,)
+            'SELECT * FROM payments WHERE website_id=%s ORDER BY payment_date DESC', (wid,)
         ).fetchall()]
         return jsonify(w)
 
     if request.method == 'PUT':
         data = request.get_json()
         db.execute(
-            'UPDATE websites SET domain=?,hosting_provider=?,start_date=?,billing_cycle=?,price=?,status=? WHERE id=?',
+            'UPDATE websites SET domain=%s,hosting_provider=%s,start_date=%s,billing_cycle=%s,price=%s,status=%s WHERE id=%s',
             (data['domain'], data.get('hosting_provider', ''),
              data.get('start_date'), data.get('billing_cycle', 'monthly'),
              data.get('price', 0), data.get('status', 'active'), wid)
         )
         db.commit()
-        return jsonify(enrich_website(dict(db.execute('SELECT * FROM websites WHERE id=?', (wid,)).fetchone())))
+        return jsonify(enrich_website(dict(db.execute('SELECT * FROM websites WHERE id=%s', (wid,)).fetchone())))
 
     # DELETE
-    db.execute('DELETE FROM payments WHERE website_id=?', (wid,))
-    db.execute('DELETE FROM websites WHERE id=?', (wid,))
+    db.execute('DELETE FROM payments WHERE website_id=%s', (wid,))
+    db.execute('DELETE FROM websites WHERE id=%s', (wid,))
     db.commit()
     return jsonify({'success': True})
 
@@ -284,32 +299,32 @@ def website_detail(wid):
 @app.route('/api/websites/<int:wid>/payments', methods=['GET', 'POST'])
 def payments(wid):
     db = get_db()
-    website = db.execute('SELECT * FROM websites WHERE id=?', (wid,)).fetchone()
+    website = db.execute('SELECT * FROM websites WHERE id=%s', (wid,)).fetchone()
     if not website:
         return jsonify({'error': 'Website not found'}), 404
 
     if request.method == 'GET':
         rows = db.execute(
-            'SELECT * FROM payments WHERE website_id=? ORDER BY payment_date DESC', (wid,)
+            'SELECT * FROM payments WHERE website_id=%s ORDER BY payment_date DESC', (wid,)
         ).fetchall()
         return jsonify([dict(r) for r in rows])
 
     data = request.get_json()
     pdate = data.get('payment_date', date.today().isoformat())
     next_due = calculate_next_due(pdate, website['billing_cycle'])
-    db.execute(
-        'INSERT INTO payments (website_id,amount,payment_date,next_due_date,notes) VALUES (?,?,?,?,?)',
+    cur = db.execute(
+        'INSERT INTO payments (website_id,amount,payment_date,next_due_date,notes) VALUES (%s,%s,%s,%s,%s) RETURNING id',
         (wid, data.get('amount', website['price']), pdate, next_due, data.get('notes', ''))
     )
     db.commit()
-    pid = db.execute('SELECT last_insert_rowid()').fetchone()[0]
-    return jsonify(dict(db.execute('SELECT * FROM payments WHERE id=?', (pid,)).fetchone())), 201
+    pid = cur.fetchone()['id']
+    return jsonify(dict(db.execute('SELECT * FROM payments WHERE id=%s', (pid,)).fetchone())), 201
 
 
 @app.route('/api/payments/<int:pid>', methods=['DELETE'])
 def delete_payment(pid):
     db = get_db()
-    db.execute('DELETE FROM payments WHERE id=?', (pid,))
+    db.execute('DELETE FROM payments WHERE id=%s', (pid,))
     db.commit()
     return jsonify({'success': True})
 
@@ -326,14 +341,14 @@ def search():
     db = get_db()
     like = f'%{q}%'
     clients = db.execute(
-        'SELECT id,name,business_name,phone,email FROM clients WHERE name LIKE ? OR business_name LIKE ? OR email LIKE ?',
+        'SELECT id,name,business_name,phone,email FROM clients WHERE name ILIKE %s OR business_name ILIKE %s OR email ILIKE %s',
         (like, like, like)
     ).fetchall()
     websites = db.execute('''
         SELECT w.id,w.domain,w.billing_cycle,w.price,
                c.id AS client_id, c.name AS client_name
         FROM websites w JOIN clients c ON w.client_id = c.id
-        WHERE w.domain LIKE ? OR c.name LIKE ?
+        WHERE w.domain ILIKE %s OR c.name ILIKE %s
     ''', (like, like)).fetchall()
     return jsonify({
         'clients': [dict(r) for r in clients],
