@@ -1417,15 +1417,54 @@
         padding: 16px;
       }
     }
+
+        /* ── INSTALL BUTTON ───────────────────────────────────── */
+    #install-btn {
+      display: none;
+      align-items: center;
+      gap: 6px;
+      margin-left: auto;
+      padding: 6px 12px;
+      background: rgba(14,165,233,.15);
+      border: 1px solid rgba(14,165,233,.3);
+      border-radius: var(--radius-sm);
+      color: var(--cyan);
+      font-size: .75rem;
+      font-family: var(--font-head);
+      font-weight: 700;
+      letter-spacing: .04em;
+      white-space: nowrap;
+      transition: background .15s;
+      cursor: pointer;
+    }
+    #install-btn.visible { display: flex; }
+    #install-btn:hover   { background: rgba(14,165,233,.25); }
+    #install-btn:active  { opacity: .75; }
   </style>
+
+  <script>
+  window._pwaInstallPrompt = null;
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    window._pwaInstallPrompt = e;
+    const btn = document.getElementById('install-btn');
+    if (btn) btn.classList.add('visible');
+  });
+  window.addEventListener('appinstalled', () => {
+    window._pwaInstallPrompt = null;
+    const btn = document.getElementById('install-btn');
+    if (btn) btn.classList.remove('visible');
+  });
+</script>
 </head>
 
 <body>
   <div id="app">
 
-    <header id="app-header">
-      <div id="app-header-title">Dashboard</div>
-    </header>
+  <header id="app-header">
+    <div id="app-header-title">SB Hosting</div>
+    <button id="install-btn" onclick="App.installPWA()"><i class="fas fa-download"></i> Install App</button>
+  </header>
 
     <main id="main-content"></main>
 

@@ -27,6 +27,28 @@ const App = {
     }
   },
 
+  async installPWA() {
+  const prompt = window._pwaInstallPrompt;
+  if (!prompt) {
+    const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+    if (isIOS) {
+      this.showToast('Tap the Share button → Add to Home Screen', 'info');
+    } else {
+      this.showToast('App is already installed or not available in this browser', 'info');
+    }
+    return;
+  }
+  prompt.prompt();
+  const { outcome } = await prompt.userChoice;
+  if (outcome === 'accepted') {
+    window._pwaInstallPrompt = null;
+    document.getElementById('install-btn')?.classList.remove('visible');
+    this.showToast('App installed ✓', 'success');
+  }
+},
+
+  
+
   // ─────────────────────────────────────────────────────────
   //  NAVIGATION
   // ─────────────────────────────────────────────────────────
